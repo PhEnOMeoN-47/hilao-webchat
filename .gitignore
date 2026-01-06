@@ -1,0 +1,12 @@
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Node / Next.js
+node_modules
+.next
+dist
+
+# Logs
+npm-debug.log*
