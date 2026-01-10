@@ -1,0 +1,7 @@
+{
+  "name": "hilao-webchat",
+  "private": true,
+  "workspaces": [
+    "apps/*"
+  ]
+}

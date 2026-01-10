@@ -1,47 +1,172 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Camera, ChevronLeft } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import { io, Socket } from "socket.io-client";
 
+/* ---------------- Types ---------------- */
+
 type Status = "Idle" | "Searching" | "Confirming" | "Matched";
+type MediaState = "idle" | "requesting" | "preview" | "denied";
+
+/* ---------------- Component ---------------- */
 
 export default function Home() {
+  const videoRef = useRef<HTMLVideoElement>(null);
+const [previewPhoto, setPreviewPhoto] = useState<string | null>(null);
+
+  const [photo, setPhoto] = useState<string | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  const [mediaGranted, setMediaGranted] = useState(false);
+  const [showDeniedDialog, setShowDeniedDialog] = useState(true);
+
+  /* ---------- Media (REQUIRED FIRST) ---------- */
+  const [mediaState, setMediaState] = useState<MediaState>("idle");
+  const [stream, setStream] = useState<MediaStream | null>(null);
+  
+  const [isEditingPhoto, setIsEditingPhoto] = useState(false);
+
+
+  /* ---------- Socket / Matchmaking ---------- */
   const [socket, setSocket] = useState<Socket | null>(null);
   const [status, setStatus] = useState<Status>("Idle");
   const [matchId, setMatchId] = useState<string | null>(null);
   const [partner, setPartner] = useState<string | null>(null);
   const [hasAccepted, setHasAccepted] = useState(false);
 
+  const capturePhoto = () => {
+  const video = videoRef.current;
+  const canvas = canvasRef.current;
+
+  if (!video || !canvas) return;
+
+  const width = video.videoWidth;
+  const height = video.videoHeight;
+
+  if (width === 0 || height === 0) {
+    console.warn("Video not ready yet");
+    return;
+  }
+
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+
+  ctx.drawImage(video, 0, 0, width, height);
+
+  const dataUrl = canvas.toDataURL("image/jpeg", 0.9);
+  setPhoto(dataUrl);
+
+  setIsEditingPhoto(false);
+
+};
+
+
+  /* ---------------- Media Logic ---------------- */
+
+  const requestMedia = async () => {
+    
+    setMediaState("requesting");
+    if (videoRef.current) {
+  videoRef.current.srcObject = stream;
+
+  videoRef.current.onloadedmetadata = () => {
+    videoRef.current?.play();
+  };
+}
+
+
+    try {
+      const s = await navigator.mediaDevices.getUserMedia({
+        video: true,
+        audio: true,
+      });
+
+      setStream(s);
+      setMediaState("preview");
+    } catch (err) {
+      console.error("❌ Media permission denied", err);
+      setMediaState("denied");
+    }
+  };
+
   useEffect(() => {
+  requestMedia();
+}, []);
+
+
+  useEffect(() => {
+    if (videoRef.current && stream) {
+      videoRef.current.srcObject = stream;
+    }
+  }, [stream]);
+  useEffect(() => {
+  const startCamera = async () => {
+    const stream = await navigator.mediaDevices.getUserMedia({
+       video: {
+    width: { ideal: 1280 },
+    height: { ideal: 720 },
+    frameRate: { ideal: 30 },
+    facingMode: "user"
+  },
+  audio: {
+    echoCancellation: true,
+    noiseSuppression: true,
+    autoGainControl: true
+  }
+    });
+
+    if (videoRef.current) {
+      videoRef.current.srcObject = stream;
+      videoRef.current.setAttribute("playsinline", "true");
+
+      videoRef.current.onloadedmetadata = () => {
+    videoRef.current?.play();
+  };
+    }
+    setMediaGranted(true);
+
+  };
+
+  startCamera();
+}, []);
+
+  /* ---------------- Socket Logic ---------------- */
+
+  useEffect(() => {
+    if (mediaState !== "preview") return;
+
     const s = io("http://localhost:4000");
 
     s.on("connect", () => {
       console.log("🆔 Socket ID:", s.id);
     });
 
-    // Step 1: backend proposes a match
+    // Backend proposes a match
     s.on("match_proposed", ({ matchId }) => {
       console.log("📩 Match proposed:", matchId);
       setMatchId(matchId);
       setStatus("Confirming");
+      setHasAccepted(false);
     });
 
-    // Step 2: both users accepted
+    // Both users accepted
     s.on("match_confirmed", ({ partnerId }) => {
       console.log("🤝 Match confirmed with:", partnerId);
       setPartner(partnerId);
       setStatus("Matched");
       setMatchId(null);
       setHasAccepted(false);
-
     });
 
-    // If either user rejects
+    // Either user rejected
     s.on("match_rejected", () => {
       console.log("❌ Match rejected");
       setMatchId(null);
       setStatus("Searching");
-      //s.emit("find_match");
     });
 
     setSocket(s);
@@ -49,7 +174,7 @@ export default function Home() {
     return () => {
       s.disconnect();
     };
-  }, []);
+  }, [mediaState]);
 
   /* ---------------- Actions ---------------- */
 
@@ -67,90 +192,293 @@ export default function Home() {
   };
 
   const acceptMatch = () => {
-  if (!socket || !matchId || hasAccepted) return;
-
-  socket.emit("accept_match", { matchId });
-  setHasAccepted(true);
-};
-
+    if (!socket || !matchId || hasAccepted) return;
+    socket.emit("accept_match", { matchId });
+    setHasAccepted(true);
+  };
 
   const rejectMatch = () => {
     if (!socket || !matchId) return;
     socket.emit("reject_match", { matchId });
     setStatus("Searching");
     setMatchId(null);
-    socket.emit("find_match");
   };
 
   /* ---------------- UI ---------------- */
 
+  /* ---------------- MEDIA GATE ---------------- */
+if (mediaState !== "preview") {
+  return (
+    <main className="h-screen flex items-center justify-center bg-black text-white">
+      
+       {/* APP NAME (always visible before preview) */}
+      <h1 className="text-7xl font-bold tracking-wide">
+        Hilao WebChat
+      </h1>
+      
+
+      {mediaState === "denied" && showDeniedDialog &&(
+  <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/60">
+    
+    <div
+      className="
+        relative
+        w-[420px]            /* bigger */
+        px-10 py-8
+        rounded-2xl
+        bg-gray-900          /* grey & opaque */
+        border border-white/10
+        shadow-2xl
+        text-center
+      "
+    >
+      <button
+        onClick={() => setShowDeniedDialog(false)}
+        className="
+          absolute top-4 right-4
+          text-gray-400
+          hover:text-white
+          text-lg
+        "
+      >
+        ✕
+      </button>
+      <p className="text-xl font-semibold mb-3">
+        Camera and microphone blocked
+      </p>
+
+      <p className="text-sm text-gray-400 mb-6 leading-relaxed">
+        Allow access to your camera and microphone in your browser settings
+        to continue.
+      </p>
+
+      <button
+        onClick={requestMedia}
+        className="
+          px-10 py-3
+          rounded-full
+          bg-yellow-400
+          text-black
+          font-semibold
+          text-sm
+          hover:brightness-110
+          active:scale-95
+          transition
+        "
+      >
+        Retry
+      </button>
+    </div>
+  </div>
+)}
+    </main>
+  );
+}
+
+/* ---------------- MAIN UI ---------------- */
 return (
-  <main className="h-screen flex flex-col items-center justify-center gap-6 bg-black text-white">
-    <h1 className="text-3xl font-bold">Hilao WebChat</h1>
+  <main className="h-screen w-screen bg-black text-white relative overflow-hidden">
 
-    {status === "Idle" && <p>Status: Idle</p>}
-    {status === "Searching" && <p>Status: Searching...</p>}
-    {status === "Matched" && <p>Matched with {partner}</p>}
+    {/* CENTER UI */}
+    <div className="relative z-10 h-full flex flex-col items-center justify-center gap-6">
 
-    {/* Start */}
-    {status === "Idle" && (
-      <button
-        onClick={startSearch}
-        className="px-6 py-3 rounded-lg bg-yellow-400 text-black font-semibold"
-      >
-        Start
-      </button>
-    )}
+      {mediaState !== "preview" && (
+  <div className="absolute inset-0 z-30 flex items-center justify-center bg-black">
+    <h1 className="text-4xl font-bold tracking-wide text-white">
+      Hilao WebChat
+    </h1>
+  </div>
+)}
+    {/* BACK BUTTON (top-left of video) */}
+{photo && isEditingPhoto && (
+  <button
+    onClick={() => setIsEditingPhoto(false)}
+    className="
+      absolute
+      top-6 left-52
+      z-30
+      w-9 h-9
+      rounded-full
+      bg-black/70
+      text-white
+      flex items-center justify-center
+      text-lg
+      hover:bg-black/90
+      transition
+    "
+  >
+    <ChevronLeft size={28} strokeWidth={2.5} className="text-white"  />
 
-    {/* Pause */}
-    {status === "Searching" && (
-      <button
-        onClick={cancelSearch}
-        className="px-6 py-3 rounded-lg bg-gray-600 text-white font-semibold"
-      >
-        ⏸ Pause
-      </button>
-    )}
+  </button>
+)}
 
-    {/* Accept / Reject */}
-    {status === "Confirming" && (
-      <div className="flex flex-col items-center gap-4 mt-4">
-        <p className="text-sm text-gray-400">
-          {hasAccepted
-            ? "Waiting for user to accept…"
-            : "Found someone! Accept?"}
-        </p>
+    {/* FULL SCREEN LIVE CAMERA */}
+    <video
+      ref={videoRef}
+      autoPlay
+      muted
+      playsInline
+      className="
+    absolute top-1/2 left-1/2
+    -translate-x-1/2 -translate-y-1/2
+    h-full
+    max-w-[1080px]    /* controls width like Chatroulette */
+    object-cover
+    rounded-xl
+    z-0
+  "
+      style={{ transform: "scaleX(-1)" }}
+    />
 
-        <div className="flex gap-8">
-          <button
-            onClick={rejectMatch}
-            disabled={hasAccepted}
-            className={`w-16 h-16 rounded-full text-2xl transition
-              ${
-                hasAccepted
-                  ? "bg-gray-700 text-gray-400 cursor-not-allowed"
-                  : "bg-red-600 text-white hover:scale-105"
-              }`}
-          >
-            ✕
-          </button>
+    {/* PREVIEW PHOTO (TOP LEFT) */}
+    {photo && (
+      <div className="absolute top-4 left-4 z-20">
 
-          <button
-            onClick={acceptMatch}
-            disabled={hasAccepted}
-            className={`w-16 h-16 rounded-full text-2xl transition
-              ${
-                hasAccepted
-                  ? "bg-gray-700 text-gray-400 cursor-not-allowed"
-                  : "bg-yellow-400 text-black hover:scale-105"
-              }`}
-          >
-            ✓
-          </button>
-        </div>
+        <img
+          src={photo}
+          alt="Preview"
+          className="w-28 h-36 rounded-lg object-cover border border-white/40"
+          style={{ transform: "scaleX(-1)" }}
+        />
+        <button
+          onClick={() => setIsEditingPhoto(true)}
+
+          className="
+        absolute bottom-0 w-full
+        bg-black/60 backdrop-blur
+        text-xs text-white
+        py-1
+      "
+        >
+          Change Photo
+        </button>
       </div>
     )}
+
+    
+
+
+      
+      {status === "Matched" && <p>Matched with {partner}</p>}
+
+      {/* CAPTURE BUTTON (only if no photo yet) */}
+      {(!photo || isEditingPhoto) && (
+         <button
+    onClick={capturePhoto}
+    className="
+  absolute bottom-10 left-1/2 -translate-x-1/2
+  w-16 h-16 rounded-full
+  bg-black/60 backdrop-blur-md
+  border border-white/10
+  shadow-lg
+  flex items-center justify-center
+  text-white text-2xl
+  hover:scale-110 active:scale-95 transition
+"
+
+  >
+    <Camera className="w-7 h-7 text-white" />
+  </button>
+      )}
+      
+
+      {/* START */}
+      {mediaGranted && status === "Idle" && photo && !isEditingPhoto && (
+    <button
+      onClick={startSearch}
+      className="
+        absolute bottom-2 left-1/2 -translate-x-1/2
+        px-33 py-3
+        rounded-full
+        bg-yellow-300 text-black font-semibold
+        text-lg
+        shadow-lg
+        z-20
+      "
+    >
+      Start
+    </button>
+  )}
+
+      {/* PAUSE */}
+{mediaGranted && status === "Searching" && (
+  <button
+    onClick={cancelSearch}
+    className="
+      absolute bottom-12 left-1/2 -translate-x-1/2
+      px-10 py-3
+      rounded-full
+      bg-gray-600
+      text-white
+      font-semibold
+      z-30
+      shadow-lg
+    "
+  >
+    ⏸ Pause
+  </button>
+)}
+
+
+      {/* ACCEPT / REJECT */}
+{status === "Confirming" && (
+  <div
+    className="
+      absolute bottom-12 left-1/2 -translate-x-1/2
+      z-30
+      flex flex-col items-center gap-4
+    "
+  >
+    <p className="text-sm text-gray-400">
+      {hasAccepted
+        ? "Waiting for user to accept…"
+        : "Found someone! Accept?"}
+    </p>
+
+    <div className="flex gap-8">
+      <button
+        onClick={rejectMatch}
+        disabled={hasAccepted}
+        className={`
+          w-16 h-16 rounded-full text-2xl
+          flex items-center justify-center
+          transition
+          ${
+            hasAccepted
+              ? "bg-gray-700 text-gray-400"
+              : "bg-red-600 text-white hover:scale-110 active:scale-95"
+          }
+        `}
+      >
+        ✕
+      </button>
+
+      <button
+        onClick={acceptMatch}
+        disabled={hasAccepted}
+        className={`
+          w-16 h-16 rounded-full text-2xl
+          flex items-center justify-center
+          transition
+          ${
+            hasAccepted
+              ? "bg-gray-700 text-gray-400"
+              : "bg-yellow-400 text-black hover:scale-110 active:scale-95"
+          }
+        `}
+      >
+        ✓
+      </button>
+    </div>
+  </div>
+)}
+
+    </div>
+
+    {/* HIDDEN CANVAS */}
+    <canvas ref={canvasRef} className="hidden" />
   </main>
 );
+
 
 }
