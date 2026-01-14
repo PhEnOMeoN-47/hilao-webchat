@@ -1,6 +1,7 @@
 "use client";
 
 import { Camera, ChevronLeft } from "lucide-react";
+import {SlidersHorizontal, User} from "lucide-react"
 import { useEffect, useRef, useState } from "react";
 import { io, Socket } from "socket.io-client";
 
@@ -13,6 +14,12 @@ type MediaState = "idle" | "requesting" | "preview" | "denied";
 
 export default function Home() {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const remoteVideoRef = useRef<HTMLVideoElement>(null);
+  const peerRef = useRef<RTCPeerConnection | null>(null);
+  const socketRef = useRef<Socket | null>(null);
+  const mySocketIdRef = useRef<string | null>(null);
+
+
 const [previewPhoto, setPreviewPhoto] = useState<string | null>(null);
 
   const [photo, setPhoto] = useState<string | null>(null);
@@ -63,6 +70,53 @@ const [previewPhoto, setPreviewPhoto] = useState<string | null>(null);
   setIsEditingPhoto(false);
 
 };
+const createPeerConnection = () => {
+  const pc = new RTCPeerConnection({
+    iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+  });
+
+  // 🎥 REMOTE TRACK
+  pc.ontrack = (event) => {
+  console.log("🎥 REMOTE TRACK RECEIVED", event.streams);
+  remoteVideoRef.current!.srcObject = event.streams[0];
+};
+
+
+  // 🧊 ICE CANDIDATES (SEND)
+  pc.onicecandidate = (event) => {
+    if (!event.candidate) return;
+
+    console.log("🧊 ICE GENERATED", event.candidate.type);
+
+    if (!partner) {
+      console.warn("ICE generated but partner not set yet");
+      return;
+    }
+
+    socketRef.current?.emit("webrtc-ice", {
+      to: partner,
+      candidate: event.candidate,
+    });
+  };
+
+  peerRef.current = pc;
+  return pc;
+};
+
+
+
+useEffect(() => {
+  if (!stream) return;
+
+  const pc = peerRef.current ?? createPeerConnection();
+
+  stream.getTracks().forEach((track) => {
+    pc.addTrack(track, stream);
+  });
+}, [stream]);
+useEffect(() => {
+  console.log("Peer connection:", peerRef.current);
+}, [peerRef.current]);
 
 
   /* ---------------- Media Logic ---------------- */
@@ -98,11 +152,11 @@ const [previewPhoto, setPreviewPhoto] = useState<string | null>(null);
 }, []);
 
 
-  useEffect(() => {
+   useEffect(() => {
     if (videoRef.current && stream) {
       videoRef.current.srcObject = stream;
     }
-  }, [stream]);
+  }, [status, stream]);
   useEffect(() => {
   const startCamera = async () => {
     const stream = await navigator.mediaDevices.getUserMedia({
@@ -137,44 +191,100 @@ const [previewPhoto, setPreviewPhoto] = useState<string | null>(null);
   /* ---------------- Socket Logic ---------------- */
 
   useEffect(() => {
-    if (mediaState !== "preview") return;
+  if (mediaState !== "preview") return;
 
-    const s = io("http://localhost:4000");
+  const s = io("http://localhost:4000");
+  socketRef.current = s;
+  setSocket(s);
 
-    s.on("connect", () => {
-      console.log("🆔 Socket ID:", s.id);
-    });
 
-    // Backend proposes a match
-    s.on("match_proposed", ({ matchId }) => {
-      console.log("📩 Match proposed:", matchId);
-      setMatchId(matchId);
-      setStatus("Confirming");
-      setHasAccepted(false);
-    });
+  s.on("connect", () => {
+    mySocketIdRef.current = s.id!;
+    console.log("🆔 Socket ID:", s.id);
+  });
 
-    // Both users accepted
-    s.on("match_confirmed", ({ partnerId }) => {
-      console.log("🤝 Match confirmed with:", partnerId);
-      setPartner(partnerId);
-      setStatus("Matched");
-      setMatchId(null);
-      setHasAccepted(false);
-    });
+  // Backend proposes a match
+  s.on("match_proposed", ({ matchId }) => {
+    console.log("📩 Match proposed:", matchId);
+    setMatchId(matchId);
+    setStatus("Confirming");
+    setHasAccepted(false);
+  });
 
-    // Either user rejected
-    s.on("match_rejected", () => {
-      console.log("❌ Match rejected");
-      setMatchId(null);
-      setStatus("Searching");
-    });
+  // Both users accepted
+  s.on("match_confirmed", async ({ partnerId }) => {
+  console.log("🤝 Match confirmed with:", partnerId);
 
-    setSocket(s);
+  setPartner(partnerId);
+  setStatus("Matched");
 
-    return () => {
-      s.disconnect();
-    };
-  }, [mediaState]);
+  const pc = peerRef.current ?? createPeerConnection();
+
+  
+
+  if (mySocketIdRef.current && mySocketIdRef.current < partnerId) {
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+
+    s.emit("webrtc-offer", { to: partnerId, offer });
+  }
+});
+
+
+  // Receive offer
+  s.on("webrtc-offer", async ({ from, offer }) => {
+  console.log("📥 Received offer");
+
+  const pc = peerRef.current ?? createPeerConnection();
+
+  
+
+  await pc.setRemoteDescription(new RTCSessionDescription(offer));
+
+  const answer = await pc.createAnswer();
+  await pc.setLocalDescription(answer);
+
+  s.emit("webrtc-answer", { to: from, answer });
+});
+
+
+  // Receive answer
+  s.on("webrtc-answer", async ({ answer }) => {
+    console.log("📥 Received answer");
+
+    const pc = peerRef.current;
+    if (!pc) return;
+
+    await pc.setRemoteDescription(new RTCSessionDescription(answer));
+  });
+
+  // 🧊 RECEIVE ICE
+  s.on("webrtc-ice", async ({ candidate }) => {
+    console.log("🧊 ICE RECEIVED", candidate.type);
+
+    const pc = peerRef.current;
+    if (!pc) return;
+
+    try {
+      await pc.addIceCandidate(new RTCIceCandidate(candidate));
+    } catch (err) {
+      console.error("❌ ICE error", err);
+    }
+  });
+
+  // Either user rejected
+  s.on("match_rejected", () => {
+    console.log("❌ Match rejected");
+    setMatchId(null);
+    setStatus("Searching");
+  });
+
+  return () => {
+    s.disconnect();
+    socketRef.current = null;
+  };
+}, [mediaState]);
+
 
   /* ---------------- Actions ---------------- */
 
@@ -289,6 +399,71 @@ return (
     </h1>
   </div>
 )}
+
+{/* TOP BAR */}
+<div
+  className="
+    absolute top-0 left-0
+    w-full h-14
+    z-40
+    bg-[#2b2b2b]
+    flex items-center justify-between
+    px-4
+  "
+>
+  {/* LEFT: HILLIES */}
+  <div className="flex items-center gap-2 text-white font-medium">
+    <div className="w-6 h-6 rounded-full bg-yellow-400 flex items-center justify-center text-black text-sm">
+      H
+    </div>
+    <span>1157</span>
+  </div>
+
+  {/* RIGHT: FILTERS + ACCOUNT */}
+  <div className="flex items-center gap-4">
+    {/* FILTERS */}
+    <button
+      className="
+        w-9 h-9
+        rounded-full
+        flex items-center justify-center
+        hover:bg-white/10
+        transition
+      "
+      title="Filters"
+    >
+      <SlidersHorizontal className="w-5 h-5 text-white/80" />
+    </button>
+
+    <div className="h-6 w-px bg-white/25" />
+
+    {/* ACCOUNT */}
+    <button
+      className="
+        w-9 h-9
+        rounded-full
+        flex items-center justify-center
+        hover:bg-white/10
+        transition
+      "
+      title="Account"
+    >
+      <User className="w-5 h-5 text-white/80" />
+    </button>
+  </div>
+</div>
+
+
+<div
+  className="
+    absolute
+    top-10
+    left-0
+    w-full
+    h-[calc(100vh-2.5rem)]
+    z-10
+  "
+>
     {/* BACK BUTTON (top-left of video) */}
 {photo && isEditingPhoto && (
   <button
@@ -312,32 +487,61 @@ return (
   </button>
 )}
 
-    {/* FULL SCREEN LIVE CAMERA */}
+    {status === "Matched" ? (
+  /* MATCHED → SPLIT VIEW */
+  <div className="absolute inset-0 pt-14 px-4 flex gap-4 z-0">
+    {/* REMOTE USER (LEFT) */}
+    <video
+      ref={remoteVideoRef}
+      autoPlay
+      playsInline
+      className="w-1/2 rounded-xl object-cover bg-black"
+    />
+
+    {/* LOCAL USER (RIGHT) */}
     <video
       ref={videoRef}
       autoPlay
       muted
       playsInline
-      className="
-    absolute top-1/2 left-1/2
-    -translate-x-1/2 -translate-y-1/2
-    h-full
-    max-w-[1080px]    /* controls width like Chatroulette */
-    object-cover
-    rounded-xl
-    z-0
-  "
+      className="w-1/2 rounded-xl object-cover bg-black"
       style={{ transform: "scaleX(-1)" }}
     />
+  </div>
+) : (
+  /* BEFORE MATCH → SINGLE CAMERA */
+  <video
+    ref={videoRef}
+    autoPlay
+    muted
+    playsInline
+    className="
+      absolute top-1/2 left-1/2
+      -translate-x-1/2 -translate-y-1/2
+      h-full
+      max-w-[1080px]
+      object-cover
+      z-0
+    "
+    style={{ transform: "scaleX(-1)" }}
+  />
+)}
+
 
     {/* PREVIEW PHOTO (TOP LEFT) */}
     {photo && (
-      <div className="absolute top-4 left-4 z-20">
+      <div className="absolute top-3 left-2 z-20">
 
         <img
           src={photo}
           alt="Preview"
-          className="w-28 h-36 rounded-lg object-cover border border-white/40"
+          className="
+  w-45
+  h-45
+  rounded-2xl
+  object-cover
+  border border-white/20
+"
           style={{ transform: "scaleX(-1)" }}
         />
         <button
@@ -473,6 +677,7 @@ return (
   </div>
 )}
 
+</div>
     </div>
 
     {/* HIDDEN CANVAS */}
