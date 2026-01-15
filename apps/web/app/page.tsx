@@ -19,6 +19,8 @@ export default function Home() {
   const socketRef = useRef<Socket | null>(null);
   const mySocketIdRef = useRef<string | null>(null);
 
+  const pendingIceCandidates = useRef<RTCIceCandidate[]>([]);
+
 
 const [previewPhoto, setPreviewPhoto] = useState<string | null>(null);
 
@@ -77,34 +79,36 @@ const createPeerConnection = () => {
 
   // 🎥 REMOTE TRACK
   pc.ontrack = (event) => {
-  console.log("🎥 REMOTE TRACK RECEIVED", event.streams);
-  remoteVideoRef.current!.srcObject = event.streams[0];
+  if (!remoteVideoRef.current) return;
+
+  remoteVideoRef.current.srcObject = event.streams[0];
+  remoteVideoRef.current.play().catch(() => {});
 };
 
 
+
   // 🧊 ICE CANDIDATES (SEND)
-  pc.onicecandidate = (event) => {
-    if (!event.candidate) return;
+ pc.onicecandidate = (event) => {
+  if (!event.candidate) return;
 
-    console.log("🧊 ICE GENERATED", event.candidate.type);
+  if (!partner) {
+    pendingIceCandidates.current.push(event.candidate);
+    return;
+  }
 
-    if (!partner) {
-      console.warn("ICE generated but partner not set yet");
-      return;
-    }
+  socketRef.current?.emit("webrtc-ice", {
+    to: partner,
+    candidate: event.candidate,
+  });
+};
 
-    socketRef.current?.emit("webrtc-ice", {
-      to: partner,
-      candidate: event.candidate,
-    });
-  };
 
   peerRef.current = pc;
   return pc;
 };
 
 
-
+/*
 useEffect(() => {
   if (!stream) return;
 
@@ -114,13 +118,15 @@ useEffect(() => {
     pc.addTrack(track, stream);
   });
 }, [stream]);
+*/
+
 useEffect(() => {
   console.log("Peer connection:", peerRef.current);
 }, [peerRef.current]);
 
 
   /* ---------------- Media Logic ---------------- */
-
+/*
   const requestMedia = async () => {
     
     setMediaState("requesting");
@@ -150,13 +156,49 @@ useEffect(() => {
   useEffect(() => {
   requestMedia();
 }, []);
-
+*/
 
    useEffect(() => {
     if (videoRef.current && stream) {
       videoRef.current.srcObject = stream;
     }
   }, [status, stream]);
+
+  // 1. Define the function inside your component body
+const requestMedia = async () => {
+  setMediaState("requesting");
+  try {
+    const s = await navigator.mediaDevices.getUserMedia({
+      video: {
+        width: { ideal: 1280 },
+        height: { ideal: 720 },
+        facingMode: "user"
+      },
+      audio: true,
+    });
+
+    setStream(s);
+    setMediaState("preview");
+    setMediaGranted(true); 
+
+    if (videoRef.current) {
+      videoRef.current.srcObject = s;
+      videoRef.current.onloadedmetadata = () => {
+        videoRef.current?.play().catch(console.error);
+      };
+    }
+  } catch (err) {
+    console.error("❌ Media permission denied", err);
+    setMediaState("denied");
+    setMediaGranted(false);
+  }
+};
+
+// 2. Use the useEffect to trigger it automatically on mount
+useEffect(() => {
+  requestMedia();
+}, []);
+  /*
   useEffect(() => {
   const startCamera = async () => {
     const stream = await navigator.mediaDevices.getUserMedia({
@@ -187,6 +229,7 @@ useEffect(() => {
 
   startCamera();
 }, []);
+*/
 
   /* ---------------- Socket Logic ---------------- */
 
@@ -218,7 +261,12 @@ useEffect(() => {
   setPartner(partnerId);
   setStatus("Matched");
 
-  const pc = peerRef.current ?? createPeerConnection();
+  const pc = createPeerConnection();
+
+  // ADD TRACKS IMMEDIATELY
+  if (stream) {
+    stream.getTracks().forEach((track) => pc.addTrack(track, stream));
+  }
 
   
 
@@ -232,15 +280,20 @@ useEffect(() => {
 
 
   // Receive offer
-  s.on("webrtc-offer", async ({ from, offer }) => {
+  // Inside your socket useEffect, find s.on("webrtc-offer", ...)
+s.on("webrtc-offer", async ({ from, offer }) => {
   console.log("📥 Received offer");
 
   const pc = peerRef.current ?? createPeerConnection();
 
-  
+  // 🚨 CRITICAL FIX: Add local tracks so the other person can see you too!
+  if (stream) {
+    stream.getTracks().forEach((track) => {
+      pc.addTrack(track, stream);
+    });
+  }
 
   await pc.setRemoteDescription(new RTCSessionDescription(offer));
-
   const answer = await pc.createAnswer();
   await pc.setLocalDescription(answer);
 
@@ -284,6 +337,19 @@ useEffect(() => {
     socketRef.current = null;
   };
 }, [mediaState]);
+
+  useEffect(() => {
+  if (!partner || !socketRef.current) return;
+
+  pendingIceCandidates.current.forEach((candidate) => {
+    socketRef.current!.emit("webrtc-ice", {
+      to: partner,
+      candidate,
+    });
+  });
+
+  pendingIceCandidates.current = [];
+}, [partner]);
 
 
   /* ---------------- Actions ---------------- */
